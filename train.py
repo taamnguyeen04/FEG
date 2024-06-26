@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.transforms import Resize, ToTensor, Compose, Normalize
 from torch.utils.data import Dataset, DataLoader
-
+from torch.utils.tensorboard import SummaryWriter
 import model
 import numpy as np
 from dataset import ExpW
@@ -44,14 +44,43 @@ def rec_l1(x, g_out):
     assert x.size() == g_out.size()
     return torch.mean(torch.abs(x-g_out))
 
+def save_checkpoint(filepath, epoch, generator, discriminator, g_optimizer, d_optimizer):
+    checkpoint = {
+        'epoch': epoch,
+        'generator_state_dict': generator.state_dict(),
+        'discriminator_state_dict': discriminator.state_dict(),
+        'g_optimizer_state_dict': g_optimizer.state_dict(),
+        'd_optimizer_state_dict': d_optimizer.state_dict()
+    }
+    print("****************************************************************************************************************************")
+    torch.save(checkpoint, filepath)
+
+def load_checkpoint(filepath, generator, discriminator, g_optimizer, d_optimizer, device):
+    if os.path.isfile(filepath):
+        print(f"Loading checkpoint '{filepath}'")
+        checkpoint = torch.load(filepath, map_location=device)
+        generator.load_state_dict(checkpoint['generator_state_dict'])
+        discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+        g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
+        d_optimizer.load_state_dict(checkpoint['d_optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Loaded checkpoint '{filepath}' (epoch {checkpoint['epoch']})")
+    else:
+        print(f"No checkpoint found at '{filepath}'")
+        start_epoch = 0
+    return start_epoch
+
 def train():
-    batch_size = 2
+    batch_size = 4
     lr = 1e-3
     num_epochs = 100
     image_channels = 3
     c_dim = 7
     image_size = 224
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(device)
+    best_d_loss = float('inf')
+    best_g_loss = float('inf')
 
     transform = Compose([
         Resize((image_size, image_size)),
@@ -59,12 +88,16 @@ def train():
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
+    log_dir = "runs/exp"
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir)
+
     # Data loader
     train_dataset = ExpW(root="data/ExpW/data", transform=transform)
     train_dataloader = DataLoader(
         dataset=train_dataset,
         batch_size=batch_size,
-        num_workers=1,
+        num_workers=8,
         shuffle=True,
         drop_last=True
     )
@@ -76,6 +109,13 @@ def train():
     # Training loop
     g_optimizer = torch.optim.SGD(params=G.parameters(), lr=lr, momentum=0.9)
     d_optimizer = torch.optim.SGD(params=D.parameters(), lr=lr, momentum=0.9)
+    # g_optimizer = torch.optim.Adam(params=G.parameters(), lr=lr)
+    # d_optimizer = torch.optim.Adam(params=D.parameters(), lr=lr)
+
+    # Load the best model if it exists
+    best_model_path = 'best_model.pt'
+    start_epoch = load_checkpoint(best_model_path, G, D, g_optimizer, d_optimizer, device)
+    print(start_epoch)
 
     for epoch in range(num_epochs):
         for i, (x_real, label_org) in enumerate(train_dataloader):
@@ -116,7 +156,20 @@ def train():
             d_loss.backward()
             d_optimizer.step()
 
+            if i % 100 == 0:
+                writer.add_scalar('Loss/Discriminator', d_loss.item(), epoch * len(train_dataloader) + i)
+                writer.add_scalar('Loss/Generator', g_loss.item(), epoch * len(train_dataloader) + i)
+
             print(f"Epoch [{epoch}/{num_epochs}], Step [{i+1}/{len(train_dataloader)}], d_loss: {d_loss.item()}, g_loss: {g_loss.item()}")
+
+            #save model
+            save_checkpoint('last_model.pt', epoch, G, D, g_optimizer, d_optimizer)
+            if d_loss.item() + g_loss.item() < best_d_loss + best_g_loss:
+                best_d_loss = d_loss.item()
+                best_g_loss = g_loss.item()
+                save_checkpoint('best_model.pt', epoch, G, D, g_optimizer, d_optimizer)
+
 
 if __name__ == '__main__':
     train()
+    # print(torch.cuda.is_available())
