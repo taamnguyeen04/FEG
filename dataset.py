@@ -1,13 +1,10 @@
-from torch.utils.data import Dataset, DataLoader
-from torchvision.transforms import Resize, ToTensor, Compose
 import os
 import torch
-import numpy as np
 import cv2
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import Resize, ToTensor, Compose
-
+import pandas as pd
 
 class EmotionImgDataset(Dataset):
     def __init__(self, root, is_train, transform=None):
@@ -15,7 +12,7 @@ class EmotionImgDataset(Dataset):
             data_path = os.path.join(root, "images")
         else:
             data_path = os.path.join(root, "test")
-        self.categories = ["Anger", "Contempt", "Disgust","Fear", "Happy", "Neutral", "Sad", "Surprised"]
+        self.categories = ["angry", "disgust", "fear","happy", "sad", "surprise", "neutral"]
         self.image_paths = []
         self.labels = []
         for dir in os.listdir(data_path):
@@ -38,10 +35,8 @@ class EmotionImgDataset(Dataset):
 
 class ExpW(Dataset):
     def __init__(self, root, transform=None):
-        img_path = os.path.join(root, "image")
-        img_path = os.path.join(img_path, "origin")
-        label_path =os.path.join(root, "label")
-        label_path =os.path.join(label_path, "label.lst")
+        img_path = os.path.join(root, "origin")
+        label_path =os.path.join(root, "label.lst")
         self.categories = ["angry", "disgust", "fear","happy", "sad", "surprise", "neutral"]
         self.image_paths = []
         self.labels = []
@@ -66,6 +61,45 @@ class ExpW(Dataset):
         return image, label
 
 
+class Affectnet(Dataset):
+    def __init__(self, root, is_train, transform=None):
+        image_path = os.path.join(root, "Manually_Annotated_Images")
+        self.transform = transform
+
+        if is_train:
+            label_path = os.path.join(root, "training.csv")
+        else:
+            label_path = os.path.join(root, "validation.csv")
+
+        list_label = pd.read_csv(label_path)
+        valid_labels = list_label[list_label['expression'] < 9]
+
+        valid_labels['full_image_path'] = valid_labels['subDirectory_filePath'].apply(
+            lambda x: os.path.join(image_path, x))
+
+        valid_labels = valid_labels[valid_labels['full_image_path'].apply(os.path.isfile)]
+
+        self.list_image = valid_labels['full_image_path'].tolist()
+        self.list_label_expression = valid_labels['expression'].tolist()
+
+    def __len__(self):
+        return len(self.list_label_expression)
+
+    def __getitem__(self, item):
+        try:
+            image = Image.open(self.list_image[item]).convert("RGB")
+            label = self.list_label_expression[item]
+
+            if self.transform:
+                image = self.transform(image)
+
+            return image, label
+
+        except (FileNotFoundError, OSError) as e:
+            print(f"Error loading image at {self.list_image[item]}: {e}")
+            next_item = (item + 1) % len(self.list_image)
+            return self.__getitem__(next_item)
+
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -73,20 +107,13 @@ if __name__ == '__main__':
         ToTensor(),
         Resize((224, 224))
     ])
-    train_dataset = ExpW(root="data/ExpW/data", transform=transform)
-    img, label = train_dataset[1]
-    print(img.shape, label)
 
+    train_dataset = Affectnet(root="/home/tam/Desktop/pythonProject1/data/AffectNet", is_train=True, transform=transform)
 
+    batch_size = 32
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    train_dataloader = DataLoader(
-        dataset=train_dataset,
-        batch_size=16,
-        num_workers=8,
-        shuffle=True,
-        drop_last=True
-    )
-    print(train_dataloader)
-    for images, labels in train_dataloader:
-        images = images.to(device)
-        labels = labels.to(device)
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+
+        print(f"Batch size: {len(images)}, Labels: {labels}")

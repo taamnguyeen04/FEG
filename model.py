@@ -1,92 +1,78 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, dim_in, dim_out):
         super(ResidualBlock, self).__init__()
-        self.conv_block = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(channels),
-            nn.ReLU(),
-            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(channels)
-        )
-
+        self.main = nn.Sequential(
+            nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.InstanceNorm2d(dim_out, affine=True, track_running_stats=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim_out, dim_out, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.InstanceNorm2d(dim_out, affine=True, track_running_stats=True))
     def forward(self, x):
-        return x + self.conv_block(x)
-
+        return x + self.main(x)
 
 class Generator(nn.Module):
-    def __init__(self, image_channels, c_dim):
+    def __init__(self, conv_dim=64, c_dim=5, repeat_num=6):
         super(Generator, self).__init__()
-        self.downsampling = nn.Sequential(
-            nn.Conv2d(image_channels + c_dim, 64, kernel_size=7, stride=1, padding=3),
-            nn.InstanceNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(128),
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(256),
-            # nn.ReLU(),
-            # nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
-            # nn.InstanceNorm2d(256),
-            nn.ReLU()
-        )
+        layers = []
+        layers.append(nn.Conv2d(3 + c_dim, conv_dim, kernel_size=7, stride=1, padding=3, bias=False))
+        layers.append(nn.InstanceNorm2d(conv_dim, affine=True, track_running_stats=True))
+        layers.append(nn.ReLU(inplace=True))
 
-        self.bottleneck = nn.Sequential(
-            *[ResidualBlock(256) for i in range(6)]
-        )
+        # Down-sampling layers.
+        curr_dim = conv_dim
+        for i in range(2):
+            layers.append(nn.Conv2d(curr_dim, curr_dim * 2, kernel_size=4, stride=2, padding=1, bias=False))
+            layers.append(nn.InstanceNorm2d(curr_dim * 2, affine=True, track_running_stats=True))
+            layers.append(nn.ReLU(inplace=True))
+            curr_dim = curr_dim * 2
 
-        self.upsampling = nn.Sequential(
-            # nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1),
-            # nn.InstanceNorm2d(128),
-            # nn.ReLU(),
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(128),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.InstanceNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, image_channels, kernel_size=7, stride=1, padding=3),
-            nn.Tanh(),
-        )
+        # Bottleneck layers.
+        for i in range(repeat_num):
+            layers.append(ResidualBlock(dim_in=curr_dim, dim_out=curr_dim))
 
-    def forward(self, x, target_domain):
-        target_domain_expanded = target_domain.unsqueeze(2).unsqueeze(3).expand(-1, -1, 224, 224)
-        x = torch.cat((x, target_domain_expanded), dim=1)
-        x = self.downsampling(x)
-        x = self.bottleneck(x)
-        x = self.upsampling(x)
-        return x
+        # Up-sampling layers.
+        for i in range(2):
+            layers.append(nn.ConvTranspose2d(curr_dim, curr_dim // 2, kernel_size=4, stride=2, padding=1, bias=False))
+            layers.append(nn.InstanceNorm2d(curr_dim // 2, affine=True, track_running_stats=True))
+            layers.append(nn.ReLU(inplace=True))
+            curr_dim = curr_dim // 2
+
+        layers.append(nn.Conv2d(curr_dim, 3, kernel_size=7, stride=1, padding=3, bias=False))
+        layers.append(nn.Tanh())
+        self.main = nn.Sequential(*layers)
+
+    def forward(self, x, c):
+        c = c.view(c.size(0), c.size(1), 1, 1)
+        c = c.repeat(1, 1, x.size(2), x.size(3))
+        x = torch.cat([x, c], dim=1)
+        return self.main(x)
 
 
 class Discriminator(nn.Module):
-    def __init__(self, image_size, image_channels, c_dim):
+    def __init__(self, image_size=224, conv_dim=64, c_dim=5, repeat_num=6):
         super(Discriminator, self).__init__()
         layers = []
-        layers.append(nn.Conv2d(image_channels, 64, kernel_size=4, stride=2, padding=1))
-        layers.append(nn.LeakyReLU())
-        curr_dim = 64
+        layers.append(nn.Conv2d(3, conv_dim, kernel_size=4, stride=2, padding=1))
+        layers.append(nn.LeakyReLU(0.01))
 
-        for i in range(1, 4):
+        curr_dim = conv_dim
+        for i in range(1, repeat_num):
             layers.append(nn.Conv2d(curr_dim, curr_dim * 2, kernel_size=4, stride=2, padding=1))
-            layers.append(nn.BatchNorm2d(curr_dim * 2))
-            layers.append(nn.LeakyReLU())
-            curr_dim *= 2
+            layers.append(nn.LeakyReLU(0.01))
+            curr_dim = curr_dim * 2
 
-        kernel_size = int(image_size / 2 ** 4)
-        self.model = nn.Sequential(*layers)
-        self.conv1 = nn.Conv2d(curr_dim, 1, kernel_size=3, stride=1, padding=1)
+        kernel_size = int(image_size / np.power(2, repeat_num))
+        self.main = nn.Sequential(*layers)
+        self.conv1 = nn.Conv2d(curr_dim, 1, kernel_size=3, stride=1, padding=1, bias=False)
         self.conv2 = nn.Conv2d(curr_dim, c_dim, kernel_size=kernel_size, bias=False)
-        self.relu = nn.ReLU()
 
     def forward(self, x):
-        h = self.model(x)
-        out_src = torch.sigmoid(self.conv1(h))  # Apply sigmoid for binary classification
+        h = self.main(x)
+        out_src = self.conv1(h)
         out_cls = self.conv2(h)
-        out_cls = self.relu(out_cls)  # Apply ReLU activation
-        out_cls = torch.softmax(out_cls.view(out_cls.size(0), -1),
-                                dim=1)  # Apply softmax for multi-class classification
-        return out_src, out_cls
+        return out_src, out_cls.view(out_cls.size(0), out_cls.size(1))
